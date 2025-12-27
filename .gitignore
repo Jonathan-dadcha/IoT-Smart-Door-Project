@@ -1,0 +1,28 @@
+# Ignore Mac system files
+.DS_Store
+
+# Ignore Python compiled files
+__pycache__/
+*.pyc
+
+# Ignore Virtual Environments
+venv/
+env/
+
+# Ignore Secrets and Configs (CRITICAL)
+client/config.py
+.env
+
+# Ignore Certificates (CRITICAL)
+certs/
+*.pem.key
+*.pem.crt
+*.pem
+
+# Ignore Temp Images
+*.jpg
+*.png
+
+# Arduino Secrets
+secrets.h
+firmware/esp32_door_lock/secrets.h
