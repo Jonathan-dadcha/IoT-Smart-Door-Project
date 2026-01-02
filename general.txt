@@ -1,0 +1,20 @@
+Chip: 63 B4 B0 1B
+
+Card: 61 3A 4E 5D
+
+
+
+
+https://see-sys.co.il/product/esp32-cam/
+
+https://see-sys.co.il/product/rfid/
+
+https://see-sys.co.il/product/1-channel-relay-module/
+
+https://www.4project.co.il/product/solenoid-with-latch-12v?srsltid=AfmBOoo820I6hwUIaLtpINOjEMPdZQ1fUUHFl_sLNtl-4FehkFvKrClo
+
+https://www.4project.co.il/product/dc-barrel-jack-adapter-female?srsltid=AfmBOor8ueSWdqRWvrbiH2-JGPzEOHg-CMglgTS538zJ2GCFIm99GUyx
+
+https://www.4project.co.il/product/breadboard-400-points-white?srsltid=AfmBOoqOZtLyp8NTr7ehMO3sQP7gCXCOEpmZgtdWCvyFnUH4YPLnQve5
+
+https://www.belshop.co.il/items/7199989
