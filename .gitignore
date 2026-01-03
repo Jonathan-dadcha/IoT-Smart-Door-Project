@@ -12,6 +12,8 @@ env/
 # Ignore Secrets and Configs (CRITICAL)
 client/config.py
 .env
+SmartDoorAI_accessKeys.csv
+*_accessKeys.csv
 
 # Ignore Certificates (CRITICAL)
 certs/
