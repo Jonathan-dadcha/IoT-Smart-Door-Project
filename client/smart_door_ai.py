@@ -1,187 +1,115 @@
 import time
-import sys
-import cv2
-import ssl
+import json
 import boto3
-import paho.mqtt.client as mqtt
-from botocore.config import Config
+import cv2
+import os
+import urllib3 
+from AWSIoTPythonSDK.MQTTLib import AWSIoTMQTTClient
+import config
 
-# ייבוא משתנים מקובץ הקונפיגורציה
-from config import (
-    AWS_ACCESS_KEY, AWS_SECRET_KEY, REGION, ENDPOINT, PORT,
-    TOPIC, CLIENT_ID, BUCKET_NAME, PATH_TO_CERT, PATH_TO_KEY, PATH_TO_ROOT
-)
+# השתקת אזהרות SSL
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# ==========================================
-# 1. הגדרת חיבור ל-AWS (S3 & Rekognition)
-# ==========================================
-my_config = Config(
-    region_name=REGION,
-    connect_timeout=10,
-    read_timeout=10,
-    retries={'max_attempts': 3}
-)
+# --- AWS Configuration ---
+AWS_IOT_ENDPOINT = config.AWS_IOT_ENDPOINT
+CLIENT_ID = config.CLIENT_ID
+TOPIC_COMMAND = config.TOPIC
+BUCKET_NAME = config.BUCKET_NAME
+COLLECTION_ID = config.REKOGNITION_COLLECTION_ID
 
+# --- Initialize AWS Clients (US Region) ---
+print(f"🔑 Connecting to AI Services in {config.AWS_REGION}...")
 session = boto3.Session(
-    aws_access_key_id=AWS_ACCESS_KEY,
-    aws_secret_access_key=AWS_SECRET_KEY,
-    region_name=REGION
+    aws_access_key_id=config.AWS_ACCESS_KEY,
+    aws_secret_access_key=config.AWS_SECRET_KEY,
+    region_name=config.AWS_REGION
 )
 
-# יצירת הקליינטים עם ההגדרות
-s3_client = session.client('s3', config=my_config)
-rekognition_client = session.client('rekognition', config=my_config)
-print("✅ AWS AI Services Ready.")
+# לקוחות עם עקיפת SSL
+s3_client = session.client('s3', verify=False)
+rekognition_client = session.client('rekognition', verify=False)
+print("✅ Connected to Rekognition & S3.")
 
+# --- Initialize MQTT Client (EU Endpoint) ---
+print(f"☁️ Connecting to IoT Broker in EU...")
+mqtt_client = AWSIoTMQTTClient(CLIENT_ID)
+mqtt_client.configureEndpoint(AWS_IOT_ENDPOINT, 8883)
+mqtt_client.configureCredentials(config.AWS_ROOT_CA, config.PRIVATE_KEY, config.CERTIFICATE)
+mqtt_client.configureAutoReconnectBackoffTime(1, 32, 20)
+mqtt_client.configureOfflinePublishQueueing(-1)
+mqtt_client.configureDrainingFrequency(2)
+mqtt_client.configureConnectDisconnectTimeout(10)
+mqtt_client.configureMQTTOperationTimeout(5)
 
-# ==========================================
-# 2. פונקציית זיהוי מול הענן
-# ==========================================
-def verify_face_with_bucket(local_image_path):
-    visitor_filename = "visitor_temp.jpg"
-    
+face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+
+def connect_mqtt():
     try:
-        # העלאת התמונה מהמצלמה ל-S3
-        s3_client.upload_file(local_image_path, BUCKET_NAME, visitor_filename)
-        
-        # קבלת רשימת התמונות בבאקט
-        bucket_objects = s3_client.list_objects_v2(Bucket=BUCKET_NAME)
-        
-        if 'Contents' not in bucket_objects:
-            print("⚠️ Bucket is empty.")
-            return False
+        mqtt_client.connect()
+        print("✅ Connected to MQTT Broker!")
+    except Exception as e:
+        print(f"❌ MQTT Connection Error: {e}")
 
-        print(f"Scanning against {len(bucket_objects['Contents'])-1} authorized users...")
+def scan_and_verify():
+    cap = cv2.VideoCapture(0) 
+    time.sleep(1)
+    
+    print("👀 Scanning for faces...")
+    
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            print("Failed to grab frame")
+            break
 
-        # לולאה שעוברת על כל התמונות בבאקט (חוץ מהאורח)
-        for obj in bucket_objects['Contents']:
-            authorized_filename = obj['Key']
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        faces = face_cascade.detectMultiScale(gray, 1.1, 4)
+        
+        for (x, y, w, h) in faces:
+            cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+
+        if len(faces) > 0:
+            print("👤 Face detected locally! Sending to US Server...")
             
-            if authorized_filename == visitor_filename:
-                continue
+            image_path = os.path.join(config.CAPTURED_FACES_DIR, "live_scan.jpg")
+            cv2.imwrite(image_path, frame)
             
             try:
-                # השוואת פנים באמצעות Rekognition
-                response = rekognition_client.compare_faces(
-                    SourceImage={'S3Object': {'Bucket': BUCKET_NAME, 'Name': authorized_filename}},
-                    TargetImage={'S3Object': {'Bucket': BUCKET_NAME, 'Name': visitor_filename}},
-                    SimilarityThreshold=80
+                # 1. העלאה ל-S3
+                s3_filename = "live_scan.jpg"
+                s3_client.upload_file(image_path, BUCKET_NAME, s3_filename)
+                
+                # 2. בדיקה מול Rekognition
+                response = rekognition_client.search_faces_by_image(
+                    CollectionId=COLLECTION_ID,
+                    Image={'S3Object': {'Bucket': BUCKET_NAME, 'Name': s3_filename}},
+                    FaceMatchThreshold=85,
+                    MaxFaces=1
                 )
                 
-                if len(response['FaceMatches']) > 0:
-                    similarity = response['FaceMatches'][0]['Similarity']
-                    print(f" >>> MATCH FOUND! User: {authorized_filename} (Score: {similarity:.1f}%)")
-                    return True 
+                face_matches = response['FaceMatches']
+                if face_matches:
+                    print(f"✅ ACCESS GRANTED! Confidence: {face_matches[0]['Similarity']:.2f}%")
+                    
+                    mqtt_client.publish(TOPIC_COMMAND, "FACE_VERIFIED", 1)
+                    print("🔓 sent FACE_VERIFIED to ESP32.")
+                    
+                    time.sleep(10) 
                 else:
-                    print(f" >>> Checked {authorized_filename}: No match.")
+                    print("⛔ ACCESS DENIED (Unknown Face)")
+                    time.sleep(2) 
 
             except Exception as e:
-                print(f"Error checking {authorized_filename}: {e}")
-                continue
+                print(f"AWS Error: {e}")
+                time.sleep(2)
 
-        print("❌ Finished scanning. No authorized user found.")
-        return False
+        cv2.imshow('Security Camera', frame)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
 
-    except Exception as e:
-        print(f"❌ AWS Error: {e}")
-        return False
+    cap.release()
+    cv2.destroyAllWindows()
 
-
-# ==========================================
-# 3. חיבור ל-MQTT (IoT Core)
-# ==========================================
-mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=CLIENT_ID)
-
-# הגדרת תעודות האבטחה
-mqtt_client.tls_set(
-    ca_certs=PATH_TO_ROOT, 
-    certfile=PATH_TO_CERT, 
-    keyfile=PATH_TO_KEY, 
-    cert_reqs=ssl.CERT_REQUIRED, 
-    tls_version=ssl.PROTOCOL_TLSv1_2
-)
-
-try:
-    print(f"☁️ Connecting to IoT Core...")
-    mqtt_client.connect(ENDPOINT, PORT, 60)
-    mqtt_client.loop_start()
-    print("✅ Connected to MQTT Broker.")
-except Exception as e:
-    print(f"❌ MQTT Connection Error: {e}")
-    sys.exit()
-
-
-# ==========================================
-# 4. לולאת המצלמה והזיהוי
-# ==========================================
-face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-cap = cv2.VideoCapture(0) # 0 = מצלמת ברירת מחדל
-
-if not cap.isOpened():
-    print("❌ Error: Could not open camera.")
-    sys.exit()
-
-print("\n🔒 SYSTEM ARMED. 2-Factor Auth Mode (Face + Card).")
-print("   Please look at the camera...")
-
-last_check_time = 0
-
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
-
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    faces = face_cascade.detectMultiScale(gray, 1.1, 5)
-
-    status_text = "SCANNING..."
-    color = (255, 0, 0) # כחול
-
-    if len(faces) > 0:
-        # בודקים רק פעם ב-5 שניות כדי לא להעמיס
-        if time.time() - last_check_time > 5:
-            print("\n👀 Face detected. Verifying...")
-            
-            # שמירת תמונה זמנית
-            cv2.imwrite("temp_capture.jpg", frame)
-            
-            # שליחה לבדיקה בענן
-            if verify_face_with_bucket("temp_capture.jpg"):
-                print("✅ ACCESS GRANTED (Step 1/2)")
-                
-                # שליחת הפקודה שדורכת את המערכת
-                mqtt_client.publish(TOPIC, "FACE_VERIFIED", qos=1)
-                
-                status_text = "FACE VERIFIED! USE CARD NOW"
-                color = (0, 255, 0) # ירוק
-                
-                # ציור מסגרת ירוקה והצגת הודעה
-                cv2.rectangle(frame, (0,0), (640,480), (0,255,0), 10)
-                cv2.putText(frame, status_text, (30, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 3)
-                cv2.imshow('Smart Door AI', frame)
-                
-                # השהיה קצרה כדי שיראו את האישור
-                cv2.waitKey(2000) 
-            else:
-                print("⛔ ACCESS DENIED (Unknown Face)")
-                status_text = "UNKNOWN USER"
-                color = (0, 0, 255) # אדום
-            
-            last_check_time = time.time()
-
-    # ציור ריבועים סביב הפנים
-    for (x, y, w, h) in faces:
-        cv2.rectangle(frame, (x, y), (x+w, y+h), color, 2)
-
-    cv2.putText(frame, status_text, (30, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
-    cv2.imshow('Smart Door AI', frame)
-
-    # יציאה עם מקש Q
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
-
-# ניקוי משאבים ביציאה
-cap.release()
-cv2.destroyAllWindows()
-mqtt_client.loop_stop()
-print("System Shutdown.")
+if __name__ == '__main__':
+    connect_mqtt()
+    scan_and_verify()
